@@ -107,7 +107,9 @@ router.post('/', async (req, res) => {
       requiredCompletionDate, 
       requiredSkills, 
       dependencies = [],
-      status = 'Not Started'
+      status = 'Not Started',
+      jiraId,
+      jiraStatus
     }: WorkItemData = req.body;
 
     if (!title || !estimateStoryPoints || !requiredCompletionDate || !requiredSkills) {
@@ -152,7 +154,9 @@ router.post('/', async (req, res) => {
           estimateStoryPoints,
           requiredCompletionDate: new Date(requiredCompletionDate),
           requiredSkills,
-          status
+          status,
+          jiraId,
+          jiraStatus
         }
       });
 
@@ -196,7 +200,9 @@ router.put('/:id', async (req, res) => {
       requiredCompletionDate, 
       requiredSkills, 
       dependencies,
-      status
+      status,
+      jiraId,
+      jiraStatus
     }: Partial<WorkItemData> = req.body;
 
     // Check if work item exists
@@ -256,7 +262,9 @@ router.put('/:id', async (req, res) => {
           ...(estimateStoryPoints !== undefined && { estimateStoryPoints }),
           ...(requiredCompletionDate && { requiredCompletionDate: new Date(requiredCompletionDate) }),
           ...(requiredSkills && { requiredSkills }),
-          ...(status && { status })
+          ...(status && { status }),
+          ...(jiraId !== undefined && { jiraId }),
+          ...(jiraStatus !== undefined && { jiraStatus })
         }
       });
 
