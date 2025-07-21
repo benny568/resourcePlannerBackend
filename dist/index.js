@@ -5,82 +5,58 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
-const dotenv_1 = __importDefault(require("dotenv"));
-const prisma_1 = require("./lib/prisma");
-// Import routes
 const teamMembers_1 = __importDefault(require("./routes/teamMembers"));
 const workItems_1 = __importDefault(require("./routes/workItems"));
 const sprints_1 = __importDefault(require("./routes/sprints"));
 const holidays_1 = __importDefault(require("./routes/holidays"));
 const sprintConfig_1 = __importDefault(require("./routes/sprintConfig"));
-// Load environment variables
-dotenv_1.default.config();
+const jiraIntegration_1 = __importDefault(require("./routes/jiraIntegration"));
+const client_1 = require("@prisma/client");
 const app = (0, express_1.default)();
-const port = process.env.PORT || 3001;
+const port = 3001;
 // Middleware
-app.use((0, cors_1.default)({
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-    credentials: true
-}));
+app.use((0, cors_1.default)());
 app.use(express_1.default.json());
-app.use(express_1.default.urlencoded({ extended: true }));
-// Request logging middleware
-app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-    next();
-});
+// Initialize Prisma
+const prisma = new client_1.PrismaClient();
 // Routes
 app.use('/api/team-members', teamMembers_1.default);
 app.use('/api/work-items', workItems_1.default);
 app.use('/api/sprints', sprints_1.default);
 app.use('/api/holidays', holidays_1.default);
 app.use('/api/sprint-config', sprintConfig_1.default);
-// Health check endpoint
-app.get('/api/health', async (req, res) => {
-    try {
-        await prisma_1.prisma.$queryRaw `SELECT 1`;
-        res.json({
-            status: 'healthy',
-            timestamp: new Date().toISOString(),
-            database: 'connected'
-        });
-    }
-    catch (error) {
-        res.status(500).json({
-            status: 'unhealthy',
-            timestamp: new Date().toISOString(),
-            database: 'disconnected',
-            error: error instanceof Error ? error.message : 'Unknown error'
-        });
-    }
+app.use('/api/jira', jiraIntegration_1.default);
+// Health check
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
-// Global error handler
+// Request logging
+app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    next();
+});
+// Error handling
 app.use((error, req, res, next) => {
-    console.error('Global error handler:', error);
-    res.status(500).json({
-        error: 'Internal server error',
-        message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
-    });
-});
-// 404 handler
-app.use('*', (req, res) => {
-    res.status(404).json({ error: 'Route not found' });
-});
-// Graceful shutdown
-process.on('SIGINT', async () => {
-    console.log('Received SIGINT, shutting down gracefully...');
-    await prisma_1.prisma.$disconnect();
-    process.exit(0);
-});
-process.on('SIGTERM', async () => {
-    console.log('Received SIGTERM, shutting down gracefully...');
-    await prisma_1.prisma.$disconnect();
-    process.exit(0);
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Internal server error' });
 });
 // Start server
-app.listen(port, () => {
-    console.log(`🚀 Resource Planner API server running on http://localhost:${port}`);
-    console.log(`📊 API endpoints available at http://localhost:${port}/api/`);
-    console.log(`🏥 Health check at http://localhost:${port}/api/health`);
+app.listen(port, '0.0.0.0', () => {
+    console.log(`🚀 Server running on http://0.0.0.0:${port}`);
+    console.log(`📊 API endpoints available:`);
+    console.log(`  - GET  /api/health`);
+    console.log(`  - GET  /api/team-members`);
+    console.log(`  - POST /api/team-members`);
+    console.log(`  - GET  /api/work-items`);
+    console.log(`  - POST /api/work-items`);
+    console.log(`  - GET  /api/sprints`);
+    console.log(`  - POST /api/sprints`);
+    console.log(`  - GET  /api/holidays`);
+    console.log(`  - POST /api/holidays`);
+    console.log(`  - GET  /api/sprint-config`);
+    console.log(`  - POST /api/sprint-config`);
+    console.log(`  - POST /api/jira/team-members`);
+    console.log(`  - POST /api/jira/epics`);
+    console.log(`  - POST /api/jira/import`);
 });
 //# sourceMappingURL=index.js.map

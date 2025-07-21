@@ -32,6 +32,8 @@ model WorkItem {
   requiredSkills          Json                     @default("[]") // Array of required skills
   status                  String                   @default("Not Started") // 'Not Started' | 'In Progress' | 'Completed'
   jiraStatus              String?                  @map("jira_status") // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
+  epicId                  String?                  @map("epic_id") // Optional Epic ID if this work item belongs to an epic
+  isEpic                  Boolean                  @default(false) @map("is_epic") // True if this work item is an epic
   createdAt               DateTime                 @default(now())
   updatedAt               DateTime                 @updatedAt
   

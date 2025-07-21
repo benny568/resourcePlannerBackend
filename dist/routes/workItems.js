@@ -32,8 +32,24 @@ router.get('/', async (req, res) => {
             dependencies: item.dependencies.map(dep => dep.dependsOnId),
             assignedSprints: item.sprintAssignments.map(assignment => assignment.sprintId)
         }));
+        // Populate children array for epic work items
+        const finalWorkItems = transformedWorkItems.map((item) => {
+            if (item.isEpic) {
+                // Find all work items that belong to this epic
+                const children = transformedWorkItems.filter((child) => child.epicId === item.id || child.epicId === item.jiraId);
+                console.log(`🔍 Epic ${item.id} (${item.title}): found ${children.length} children`);
+                if (children.length > 0) {
+                    console.log(`📝 Children IDs: ${children.map((c) => c.id).join(', ')}`);
+                }
+                return {
+                    ...item,
+                    children: children.length > 0 ? children : undefined
+                };
+            }
+            return item;
+        });
         const response = {
-            data: transformedWorkItems
+            data: finalWorkItems
         };
         res.json(response);
     }
@@ -94,7 +110,7 @@ router.get('/:id', async (req, res) => {
 // POST /api/work-items - Create a new work item
 router.post('/', async (req, res) => {
     try {
-        const { title, description, estimateStoryPoints, requiredCompletionDate, requiredSkills, dependencies = [], status = 'Not Started' } = req.body;
+        const { title, description, estimateStoryPoints, requiredCompletionDate, requiredSkills, dependencies = [], status = 'Not Started', jiraId, jiraStatus, epicId, isEpic = false } = req.body;
         if (!title || !estimateStoryPoints || !requiredCompletionDate || !requiredSkills) {
             const apiError = {
                 error: 'Missing required fields',
@@ -133,7 +149,11 @@ router.post('/', async (req, res) => {
                     estimateStoryPoints,
                     requiredCompletionDate: new Date(requiredCompletionDate),
                     requiredSkills,
-                    status
+                    status,
+                    jiraId,
+                    jiraStatus,
+                    epicId,
+                    isEpic
                 }
             });
             // Create dependency relationships
@@ -166,7 +186,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { title, description, estimateStoryPoints, requiredCompletionDate, requiredSkills, dependencies, status } = req.body;
+        const { title, description, estimateStoryPoints, requiredCompletionDate, requiredSkills, dependencies, status, jiraId, jiraStatus, epicId, isEpic } = req.body;
         // Check if work item exists
         const existingWorkItem = await prisma_1.prisma.workItem.findUnique({
             where: { id }
@@ -218,7 +238,11 @@ router.put('/:id', async (req, res) => {
                     ...(estimateStoryPoints !== undefined && { estimateStoryPoints }),
                     ...(requiredCompletionDate && { requiredCompletionDate: new Date(requiredCompletionDate) }),
                     ...(requiredSkills && { requiredSkills }),
-                    ...(status && { status })
+                    ...(status && { status }),
+                    ...(jiraId !== undefined && { jiraId }),
+                    ...(jiraStatus !== undefined && { jiraStatus }),
+                    ...(epicId !== undefined && { epicId }),
+                    ...(isEpic !== undefined && { isEpic })
                 }
             });
             // Update dependencies if provided

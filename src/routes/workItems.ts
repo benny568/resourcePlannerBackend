@@ -32,8 +32,35 @@ router.get('/', async (req, res) => {
       assignedSprints: item.sprintAssignments.map(assignment => assignment.sprintId)
     }));
 
-    const response: ApiResponse<typeof transformedWorkItems> = {
-      data: transformedWorkItems
+    // Populate children array for epic work items and filter out epic children from main list
+    const epicWorkItemIds = new Set(transformedWorkItems.filter((item: any) => item.isEpic).map((item: any) => item.id));
+    
+    const finalWorkItems = transformedWorkItems
+      .filter((item: any) => {
+        // Exclude epic children if their parent epic exists as a work item
+        if (item.epicId && epicWorkItemIds.has(item.epicId)) {
+          return false; // Don't include epic children as separate work items
+        }
+        return true; // Include all other items
+      })
+      .map((item: any) => {
+        if (item.isEpic) {
+          // Find all work items that belong to this epic
+          const children = transformedWorkItems.filter((child: any) => 
+            child.epicId === item.id || child.epicId === item.jiraId
+          );
+          
+          return {
+            ...item,
+            children: children.length > 0 ? children : undefined
+          };
+        }
+        
+        return item;
+      });
+
+    const response: ApiResponse<typeof finalWorkItems> = {
+      data: finalWorkItems
     };
 
     res.json(response);
@@ -109,10 +136,21 @@ router.post('/', async (req, res) => {
       dependencies = [],
       status = 'Not Started',
       jiraId,
-      jiraStatus
+      jiraStatus,
+      epicId,
+      isEpic = false
     }: WorkItemData = req.body;
 
-    if (!title || !estimateStoryPoints || !requiredCompletionDate || !requiredSkills) {
+    if (!title || !estimateStoryPoints || !requiredCompletionDate || !requiredSkills || (Array.isArray(requiredSkills) && requiredSkills.length === 0)) {
+      console.error('❌ Work item validation failed:', {
+        title: title || 'MISSING',
+        estimateStoryPoints: estimateStoryPoints || 'MISSING',
+        requiredCompletionDate: requiredCompletionDate || 'MISSING',
+        requiredSkills: requiredSkills || 'MISSING',
+        requiredSkillsLength: Array.isArray(requiredSkills) ? requiredSkills.length : 'NOT_ARRAY',
+        fullRequestBody: JSON.stringify(req.body, null, 2)
+      });
+      
       const apiError: ApiError = {
         error: 'Missing required fields',
         message: 'title, estimateStoryPoints, requiredCompletionDate, and requiredSkills are required'
@@ -121,6 +159,13 @@ router.post('/', async (req, res) => {
     }
 
     if (estimateStoryPoints <= 0) {
+      console.error('❌ Invalid story points validation failed:', {
+        estimateStoryPoints,
+        type: typeof estimateStoryPoints,
+        title,
+        jiraId
+      });
+      
       const apiError: ApiError = {
         error: 'Invalid story points',
         message: 'Story points must be greater than 0'
@@ -156,7 +201,9 @@ router.post('/', async (req, res) => {
           requiredSkills,
           status,
           jiraId,
-          jiraStatus
+          jiraStatus,
+          epicId,
+          isEpic
         }
       });
 
@@ -202,7 +249,9 @@ router.put('/:id', async (req, res) => {
       dependencies,
       status,
       jiraId,
-      jiraStatus
+      jiraStatus,
+      epicId,
+      isEpic
     }: Partial<WorkItemData> = req.body;
 
     // Check if work item exists
@@ -264,7 +313,9 @@ router.put('/:id', async (req, res) => {
           ...(requiredSkills && { requiredSkills }),
           ...(status && { status }),
           ...(jiraId !== undefined && { jiraId }),
-          ...(jiraStatus !== undefined && { jiraStatus })
+          ...(jiraStatus !== undefined && { jiraStatus }),
+          ...(epicId !== undefined && { epicId }),
+          ...(isEpic !== undefined && { isEpic })
         }
       });
 
@@ -456,6 +507,39 @@ router.delete('/:id/assign-sprint/:sprintId', async (req, res) => {
     console.error('Error removing work item from sprint:', error);
     const apiError: ApiError = {
       error: 'Failed to remove work item from sprint',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    };
+    res.status(500).json(apiError);
+  }
+});
+
+// DELETE /api/work-items/clear-all - Clear all work items (for testing)
+router.delete('/clear-all', async (req, res) => {
+  try {
+    console.log('🧹 Clearing all work items from database...');
+    
+    // Delete all sprint assignments first (foreign key constraint)
+    await prisma.sprintWorkItem.deleteMany({});
+    console.log('✅ Cleared all sprint assignments');
+    
+    // Delete all work item dependencies
+    await prisma.workItemDependency.deleteMany({});
+    console.log('✅ Cleared all work item dependencies');
+    
+    // Delete all work items
+    const deletedCount = await prisma.workItem.deleteMany({});
+    console.log(`✅ Deleted ${deletedCount.count} work items`);
+
+    const response: ApiResponse<{ deletedCount: number }> = {
+      data: { deletedCount: deletedCount.count },
+      message: 'All work items cleared successfully'
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error('Error clearing work items:', error);
+    const apiError: ApiError = {
+      error: 'Failed to clear work items',
       message: error instanceof Error ? error.message : 'Unknown error'
     };
     res.status(500).json(apiError);

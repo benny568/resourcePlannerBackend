@@ -17,6 +17,7 @@ export interface WorkItemData {
   jiraId?: string | null; // Optional Jira ticket ID (e.g., REF-1234)
   jiraStatus?: string | null; // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
   epicId?: string | null; // Optional Epic ID if this work item belongs to an epic
+  isEpic?: boolean; // True if this work item is an epic
 }
 
 export interface EpicData {
@@ -69,6 +70,7 @@ export interface WorkItemResponse {
   assignedSprints: string[];
   jiraId?: string | null; // Optional Jira ticket ID (e.g., REF-1234)
   jiraStatus?: string | null; // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
+  epicId?: string | null; // Optional Epic ID if this work item belongs to an epic
 }
 
 export interface SprintResponse {

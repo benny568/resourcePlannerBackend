@@ -12,6 +12,17 @@ export interface WorkItemData {
     requiredSkills: Skill[];
     dependencies?: string[];
     status?: 'Not Started' | 'In Progress' | 'Completed';
+    jiraId?: string | null;
+    jiraStatus?: string | null;
+    epicId?: string | null;
+    isEpic?: boolean;
+}
+export interface EpicData {
+    jiraId: string;
+    title: string;
+    description?: string;
+    status?: 'Not Started' | 'In Progress' | 'Completed';
+    jiraStatus?: string | null;
 }
 export interface SprintData {
     name: string;
@@ -48,6 +59,9 @@ export interface WorkItemResponse {
     status: string;
     dependencies: string[];
     assignedSprints: string[];
+    jiraId?: string | null;
+    jiraStatus?: string | null;
+    epicId?: string | null;
 }
 export interface SprintResponse {
     id: string;
@@ -59,6 +73,19 @@ export interface SprintResponse {
     plannedVelocity: number;
     actualVelocity: number | null;
     workItems: string[];
+}
+export interface EpicResponse {
+    id: string;
+    jiraId: string;
+    title: string;
+    description: string | null;
+    status: string;
+    jiraStatus: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    children: WorkItemResponse[];
+    totalStoryPoints: number;
+    completedStoryPoints: number;
 }
 export interface ApiResponse<T> {
     data: T;

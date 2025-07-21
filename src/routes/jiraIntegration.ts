@@ -66,7 +66,7 @@ function convertJiraStatusToWorkItemStatus(jiraStatus: string): string {
 function validateStoryPoints(value: any): number {
   // Handle null, undefined, or "None" values
   if (value === null || value === undefined || value === "None" || value === "") {
-    return 0;
+    return 1; // Return 1 instead of 0 to pass backend validation
   }
   
   // Convert to number if it's a string
@@ -75,23 +75,23 @@ function validateStoryPoints(value: any): number {
     // Handle string numbers
     points = parseFloat(value.trim());
     if (isNaN(points)) {
-      return 0;
+      return 1; // Return 1 instead of 0 to pass backend validation
     }
   } else if (typeof value === 'number') {
     points = value;
   } else {
-    return 0;
+    return 1; // Return 1 instead of 0 to pass backend validation
   }
   
   // Cap story points at a reasonable maximum (20 points)
   // If the value is unreasonably high (>100), it's probably not story points
   if (points > 100) {
-    console.warn(`⚠️ Unreasonable story points value ${points}, setting to 0`);
-    return 0;
+    console.warn(`⚠️ Unreasonable story points value ${points}, setting to 1`);
+    return 1;
   }
   
-  // Ensure positive values and reasonable range
-  return Math.max(0, Math.min(points, 20));
+  // Ensure positive values and reasonable range (minimum 0.5 for fractional points)
+  return Math.max(0.5, Math.min(points, 20));
 }
 
 // Helper function to extract plain text from Atlassian Document Format
@@ -303,7 +303,55 @@ router.post('/ticket', async (req, res) => {
   }
 });
 
-// Extract epics from Jira project
+// Extract regular work items (NOT epics) from Jira project
+router.post('/work-items', async (req, res) => {
+  try {
+    const { projectKey } = ProjectKeySchema.parse(req.body);
+    console.log(`🔍 Extracting regular work items (excluding epics) from Jira project: ${projectKey}`);
+
+    // Get all non-epic issues from the project that are not Done AND are not children of epics
+    const jql = `project = ${projectKey} AND issuetype != Epic AND status != Done AND parent is EMPTY`;
+    console.log(`🔍 Executing JQL for work items (excluding epic children): ${jql}`);
+    
+    // Use configurable story points field (default to customfield_10016)
+    const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+    const searchData = await callJiraAPI('search', {
+      jql: jql,
+      fields: `key,summary,description,status,created,updated,assignee,labels,${storyPointsField},fixVersions`,
+      limit: 100
+    }) as JiraSearchResponse;
+
+    // Convert tickets to work item format
+    const workItems = (searchData.issues || []).map(ticket => ({
+      id: ticket.key,
+      jiraId: ticket.key,
+      title: ticket.fields.summary,
+      description: extractTextFromADF(ticket.fields.description) || `Work item imported from Jira ticket ${ticket.key}`,
+      estimateStoryPoints: validateStoryPoints((ticket.fields as any)[storyPointsField]),
+      requiredCompletionDate: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(), // 60 days for regular work items
+      requiredSkills: (ticket.fields.labels || []).filter(label => 
+        ['frontend', 'backend', 'devops', 'design', 'qa'].includes(label.toLowerCase())
+      ),
+      dependencies: [],
+      status: convertJiraStatusToWorkItemStatus(ticket.fields.status.name),
+      jiraStatus: ticket.fields.status.name,
+      assignedSprints: []
+    }));
+
+    console.log(`✅ Extracted ${workItems.length} regular work items (excluding epics) from Jira API for project ${projectKey}`);
+    res.json(workItems);
+
+  } catch (error) {
+    console.error('❌ Error extracting work items from Jira API:', error);
+    res.status(503).json({
+      error: 'Failed to extract work items from Jira API',
+      details: error instanceof Error ? error.message : 'Unknown error',
+      suggestion: 'Check Jira API connectivity and credentials'
+    });
+  }
+});
+
+// Extract epics from Jira project (DEPRECATED - use epics-with-children instead)
 router.post('/epics', async (req, res) => {
   try {
     const { projectKey } = ProjectKeySchema.parse(req.body);
@@ -375,27 +423,44 @@ router.post('/import', async (req, res) => {
 
 // Import epics with their children from Jira project
 router.post('/epics-with-children', async (req, res) => {
+  // Set a timeout for this request to prevent indefinite hanging
+  const timeoutMs = 120000; // 2 minutes
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Request timeout after 2 minutes')), timeoutMs);
+  });
+
   try {
     const { projectKey } = ProjectKeySchema.parse(req.body);
     console.log(`🔍 Extracting epics with children from Jira project: ${projectKey}`);
     console.log(`📋 Filtering: Only epics with status != 'Done' will be included`);
+    console.log(`⏰ Request will timeout after ${timeoutMs/1000} seconds`);
 
     const epicsWithChildren: EpicWithChildren[] = [];
     
-    // First, get all epics from the project that are not Done
-    const jql = `project = ${projectKey} AND issuetype = Epic AND status != Done`;
-    console.log(`🔍 Executing JQL: ${jql}`);
-    
-    const epicsData = await callJiraAPI('search', {
-      jql: jql,
-      fields: 'key,summary,description,status,created,updated,assignee,fixVersions,labels',
-      limit: 100
-    }) as JiraSearchResponse;
+    // Wrap the main processing in a race with timeout
+    const processEpics = async () => {
+      // First, get all epics from the project that are not Done
+      const jql = `project = ${projectKey} AND issuetype = Epic AND status != Done`;
+      console.log(`🔍 Executing JQL: ${jql}`);
+      
+      const epicsData = await callJiraAPI('search', {
+        jql: jql,
+        fields: 'key,summary,description,status,created,updated,assignee,fixVersions,labels',
+        limit: 100
+      }) as JiraSearchResponse;
 
     console.log(`📊 Found ${epicsData.issues?.length || 0} epics from Jira API`);
 
-    // Process each epic
-    for (const epic of epicsData.issues || []) {
+    if ((epicsData.issues?.length || 0) > 50) {
+      console.log(`⚠️ Large number of epics (${epicsData.issues?.length}), limiting to first 50 to prevent timeout`);
+      epicsData.issues = epicsData.issues?.slice(0, 50);
+    }
+
+    // Use configurable story points field (default to customfield_10016)
+    const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+
+    // Process epics in parallel with concurrency limit
+    const processEpicWithChildren = async (epic: any): Promise<EpicWithChildren> => {
       const epicData: EpicWithChildren = {
         id: epic.key,
         jiraId: epic.key,
@@ -411,8 +476,6 @@ router.post('/epics-with-children', async (req, res) => {
       // Get children for this epic
       try {
         const childrenJql = `parent = ${epic.key}`;
-        // Use configurable story points field (default to customfield_10016)
-        const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
         const childrenData = await callJiraAPI('search', {
           jql: childrenJql,
           fields: `key,summary,description,status,${storyPointsField},assignee,priority`,
@@ -459,22 +522,57 @@ router.post('/epics-with-children', async (req, res) => {
         // Don't fail the whole request, just log the error and continue with empty children
       }
 
-      epicsWithChildren.push(epicData);
+      return epicData;
+    };
+
+    // Process epics in batches of 10 to avoid overwhelming the system
+    const batchSize = 10;
+    const epics = epicsData.issues || [];
+    
+    for (let i = 0; i < epics.length; i += batchSize) {
+      const batch = epics.slice(i, i + batchSize);
+      console.log(`🔄 Processing epic batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(epics.length/batchSize)} (${batch.length} epics)`);
+      
+      const batchResults = await Promise.all(
+        batch.map(epic => processEpicWithChildren(epic))
+      );
+      
+      epicsWithChildren.push(...batchResults);
+      
+      // Add a small delay between batches to be nice to the API
+      if (i + batchSize < epics.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
 
-    const totalChildren = epicsWithChildren.reduce((total, epic) => total + epic.children.length, 0);
-    const totalStoryPoints = epicsWithChildren.reduce((total, epic) => total + epic.totalStoryPoints, 0);
-    
-    console.log(`✅ Returning ${epicsWithChildren.length} epics (status != 'Done') with ${totalChildren} children (${totalStoryPoints} total story points) for project ${projectKey}`);
-    res.json(epicsWithChildren);
+      return epicsWithChildren;
+    };
 
-  } catch (error) {
+    // Race between processing and timeout
+    const result = await Promise.race([processEpics(), timeoutPromise]) as EpicWithChildren[];
+
+    const totalChildren = result.reduce((total, epic) => total + epic.children.length, 0);
+    const totalStoryPoints = result.reduce((total, epic) => total + epic.totalStoryPoints, 0);
+    
+    console.log(`✅ Returning ${result.length} epics (status != 'Done') with ${totalChildren} children (${totalStoryPoints} total story points) for project ${projectKey}`);
+    res.json(result);
+
+  } catch (error: any) {
     console.error('❌ Error extracting epics with children from Jira API:', error);
-    res.status(503).json({
-      error: 'Failed to extract epics with children from Jira API',
-      details: error instanceof Error ? error.message : 'Unknown error',
-      suggestion: 'Check Jira API connectivity and credentials'
-    });
+    
+    if (error.message?.includes('timeout')) {
+      res.status(504).json({
+        error: 'Request timeout while extracting epics from Jira API',
+        details: 'The request took too long to process. Try requesting fewer epics or check Jira API performance.',
+        suggestion: 'Consider using smaller batches or filtering to fewer epics'
+      });
+    } else {
+      res.status(503).json({
+        error: 'Failed to extract epics with children from Jira API',
+        details: error instanceof Error ? error.message : 'Unknown error',
+        suggestion: 'Check Jira API connectivity and credentials'
+      });
+    }
   }
 });
 
