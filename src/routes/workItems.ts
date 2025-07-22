@@ -31,6 +31,14 @@ router.get('/', async (req, res) => {
       dependencies: item.dependencies.map(dep => dep.dependsOnId),
       assignedSprints: item.sprintAssignments.map(assignment => assignment.sprintId)
     }));
+    
+    console.log(`🗃️ RAW DATABASE QUERY: Retrieved ${workItems.length} total work items from database`);
+    console.log(`🔍 Work items breakdown:`, {
+      totalItems: transformedWorkItems.length,
+      epics: transformedWorkItems.filter(item => item.isEpic).length,
+      epicChildren: transformedWorkItems.filter(item => item.epicId).length,
+      regular: transformedWorkItems.filter(item => !item.isEpic && !item.epicId).length
+    });
 
     // Deduplicate epic work items by jiraId (keep the most recent one by creation date)
     const epicMap = new Map();
@@ -61,11 +69,11 @@ router.get('/', async (req, res) => {
     // Filter out epic children and non-deduplicated epics
     const finalWorkItems = transformedWorkItems
       .filter((item: any) => {
-        // Exclude epic children if their parent epic exists as a work item (check both ID and jiraId)
+        // Exclude epic children from main list - they'll only appear under their parent epic
         if (item.epicId) {
           const epicJiraId = allEpicIdToJiraId.get(item.epicId);
           if (epicWorkItemIds.has(item.epicId) || epicJiraIds.has(epicJiraId)) {
-            console.log(`🚫 Filtering out epic child: ${item.title} (epicId: ${item.epicId}, jiraId: ${epicJiraId})`);
+            console.log(`🚫 Filtering out epic child (will appear under parent): ${item.title} (epicId: ${item.epicId})`);
             return false; // Don't include epic children as separate work items
           }
         }
