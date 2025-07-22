@@ -32,23 +32,58 @@ router.get('/', async (req, res) => {
       assignedSprints: item.sprintAssignments.map(assignment => assignment.sprintId)
     }));
 
-    // Populate children array for epic work items and filter out epic children from main list
-    const epicWorkItemIds = new Set(transformedWorkItems.filter((item: any) => item.isEpic).map((item: any) => item.id));
+    // Deduplicate epic work items by jiraId (keep the most recent one by creation date)
+    const epicMap = new Map();
+    const epics = transformedWorkItems.filter((item: any) => item.isEpic);
     
+    for (const epic of epics) {
+      const existingEpic = epicMap.get(epic.jiraId);
+      if (!existingEpic || new Date(epic.createdAt) > new Date(existingEpic.createdAt)) {
+        epicMap.set(epic.jiraId, epic);
+      }
+    }
+    
+    const deduplicatedEpics = Array.from(epicMap.values());
+    const epicWorkItemIds = new Set(deduplicatedEpics.map((item: any) => item.id));
+    const epicJiraIds = new Set(deduplicatedEpics.map((item: any) => item.jiraId));
+    
+    console.log(`🔍 Found ${epics.length} epic work items, deduplicated to ${deduplicatedEpics.length}`);
+    if (epics.length > deduplicatedEpics.length) {
+      console.log(`⚠️  Removed ${epics.length - deduplicatedEpics.length} duplicate epic(s)`);
+    }
+    
+    // Also create a map of ALL epic IDs (including duplicates) to their jiraIds for filtering
+    const allEpicIdToJiraId = new Map();
+    for (const epic of epics) {
+      allEpicIdToJiraId.set(epic.id, epic.jiraId);
+    }
+    
+    // Filter out epic children and non-deduplicated epics
     const finalWorkItems = transformedWorkItems
       .filter((item: any) => {
-        // Exclude epic children if their parent epic exists as a work item
-        if (item.epicId && epicWorkItemIds.has(item.epicId)) {
-          return false; // Don't include epic children as separate work items
+        // Exclude epic children if their parent epic exists as a work item (check both ID and jiraId)
+        if (item.epicId) {
+          const epicJiraId = allEpicIdToJiraId.get(item.epicId);
+          if (epicWorkItemIds.has(item.epicId) || epicJiraIds.has(epicJiraId)) {
+            console.log(`🚫 Filtering out epic child: ${item.title} (epicId: ${item.epicId}, jiraId: ${epicJiraId})`);
+            return false; // Don't include epic children as separate work items
+          }
+        }
+        // Exclude duplicate epics (keep only deduplicated ones)
+        if (item.isEpic && !epicWorkItemIds.has(item.id)) {
+          console.log(`🚫 Filtering out duplicate epic: ${item.title} (id: ${item.id})`);
+          return false; // Don't include duplicate epic work items
         }
         return true; // Include all other items
       })
       .map((item: any) => {
         if (item.isEpic) {
-          // Find all work items that belong to this epic
+          // Find all work items that belong to this epic (check both DB ID and Jira ID)
           const children = transformedWorkItems.filter((child: any) => 
             child.epicId === item.id || child.epicId === item.jiraId
           );
+          
+          console.log(`📋 Epic "${item.title}" has ${children.length} children`);
           
           return {
             ...item,
@@ -187,6 +222,25 @@ router.post('/', async (req, res) => {
           message: 'Some dependency work items do not exist'
         };
         return res.status(400).json(apiError);
+      }
+    }
+
+    // Check for duplicate epic work items by jiraId
+    if (isEpic && jiraId) {
+      const existingEpic = await prisma.workItem.findFirst({
+        where: {
+          jiraId,
+          isEpic: true
+        }
+      });
+
+      if (existingEpic) {
+        console.log(`⚠️  Preventing duplicate epic creation for jiraId: ${jiraId} (existing ID: ${existingEpic.id})`);
+        const apiError: ApiError = {
+          error: 'Duplicate epic',
+          message: `Epic with Jira ID ${jiraId} already exists as work item ${existingEpic.id}`
+        };
+        return res.status(409).json(apiError);
       }
     }
 
