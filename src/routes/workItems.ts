@@ -69,12 +69,12 @@ router.get('/', async (req, res) => {
     // Filter out epic children and non-deduplicated epics
     const finalWorkItems = transformedWorkItems
       .filter((item: any) => {
-        // Exclude epic children from main list - they'll only appear under their parent epic
+        // Include epic children as individual work items for drag and drop functionality
         if (item.epicId) {
           const epicJiraId = allEpicIdToJiraId.get(item.epicId);
           if (epicWorkItemIds.has(item.epicId) || epicJiraIds.has(epicJiraId)) {
-            console.log(`🚫 Filtering out epic child (will appear under parent): ${item.title} (epicId: ${item.epicId})`);
-            return false; // Don't include epic children as separate work items
+            console.log(`✅ Including epic child for drag and drop: ${item.title} (epicId: ${item.epicId})`);
+            return true; // Include epic children as separate work items for drag and drop
           }
         }
         // Exclude duplicate epics (keep only deduplicated ones)
