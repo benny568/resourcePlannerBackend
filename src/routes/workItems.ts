@@ -31,7 +31,7 @@ router.get('/', async (req, res) => {
       dependencies: item.dependencies.map(dep => dep.dependsOnId),
       assignedSprints: item.sprintAssignments.map(assignment => assignment.sprintId)
     }));
-    
+
     console.log(`🗃️ RAW DATABASE QUERY: Retrieved ${workItems.length} total work items from database`);
     console.log(`🔍 Work items breakdown:`, {
       totalItems: transformedWorkItems.length,
@@ -85,22 +85,22 @@ router.get('/', async (req, res) => {
         return true; // Include all other items
       })
       .map((item: any) => {
-        if (item.isEpic) {
+      if (item.isEpic) {
           // Find all work items that belong to this epic (check both DB ID and Jira ID)
-          const children = transformedWorkItems.filter((child: any) => 
-            child.epicId === item.id || child.epicId === item.jiraId
-          );
-          
-          console.log(`📋 Epic "${item.title}" has ${children.length} children`);
-          
-          return {
-            ...item,
-            children: children.length > 0 ? children : undefined
-          };
-        }
+        const children = transformedWorkItems.filter((child: any) => 
+          child.epicId === item.id || child.epicId === item.jiraId
+        );
         
-        return item;
-      });
+          console.log(`📋 Epic "${item.title}" has ${children.length} children`);
+        
+        return {
+          ...item,
+          children: children.length > 0 ? children : undefined
+        };
+      }
+      
+      return item;
+    });
 
     const response: ApiResponse<typeof finalWorkItems> = {
       data: finalWorkItems
