@@ -8,6 +8,13 @@ const ProjectKeySchema = z.object({
   projectKey: z.string().min(1).max(10).default('REF')
 });
 
+// Schema for paginated epic import
+const PaginatedProjectKeySchema = z.object({
+  projectKey: z.string().min(1).max(10).default('REF'),
+  limit: z.number().min(1).max(100).default(25),
+  startAt: z.number().min(0).default(0)
+});
+
 // Types for Jira responses
 interface JiraUser {
   account_id: string;
@@ -48,6 +55,16 @@ interface EpicWithChildren {
   children: any[];
   totalStoryPoints: number;
   completedStoryPoints: number;
+}
+
+interface PaginatedEpicsResponse {
+  epics: EpicWithChildren[];
+  pagination: {
+    limit: number;
+    startAt: number;
+    total: number;
+    hasMore: boolean;
+  };
 }
 
 // Helper function to convert Jira status to work item status
@@ -430,31 +447,30 @@ router.post('/epics-with-children', async (req, res) => {
   });
 
   try {
-    const { projectKey } = ProjectKeySchema.parse(req.body);
+    const { projectKey, limit, startAt } = PaginatedProjectKeySchema.parse(req.body);
     console.log(`🔍 Extracting epics with children from Jira project: ${projectKey}`);
-    console.log(`📋 Filtering: Only epics with status != 'Done' will be included`);
+    console.log(`📋 Filtering: Only epics with status NOT IN ('Done', 'Cancelled') will be included`);
+    console.log(`📄 Pagination: limit=${limit}, startAt=${startAt}`);
     console.log(`⏰ Request will timeout after ${timeoutMs/1000} seconds`);
 
     const epicsWithChildren: EpicWithChildren[] = [];
     
     // Wrap the main processing in a race with timeout
-    const processEpics = async () => {
-      // First, get all epics from the project that are not Done
-      const jql = `project = ${projectKey} AND issuetype = Epic AND status != Done`;
+    const processEpics = async (): Promise<PaginatedEpicsResponse> => {
+      // First, get epics from the project that are not Done/Cancelled with pagination
+      const jql = `project = ${projectKey} AND issuetype = Epic AND status NOT IN (Done, Cancelled)`;
       console.log(`🔍 Executing JQL: ${jql}`);
       
       const epicsData = await callJiraAPI('search', {
         jql: jql,
         fields: 'key,summary,description,status,created,updated,assignee,fixVersions,labels',
-        limit: 100
+        startAt: startAt,
+        maxResults: limit
       }) as JiraSearchResponse;
 
-    console.log(`📊 Found ${epicsData.issues?.length || 0} epics from Jira API`);
+    console.log(`📊 Found ${epicsData.issues?.length || 0} epics from Jira API (${startAt} to ${startAt + (epicsData.issues?.length || 0)} of ${epicsData.total} total)`);
 
-    if ((epicsData.issues?.length || 0) > 50) {
-      console.log(`⚠️ Large number of epics (${epicsData.issues?.length}), limiting to first 50 to prevent timeout`);
-      epicsData.issues = epicsData.issues?.slice(0, 50);
-    }
+    // No more artificial limit - process all epics returned by pagination
 
     // Use configurable story points field (default to customfield_10016)
     const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
@@ -525,9 +541,13 @@ router.post('/epics-with-children', async (req, res) => {
       return epicData;
     };
 
+    // Apply pagination limit to the epics returned by Jira API
+    const allEpics = epicsData.issues || [];
+    const epics = allEpics.slice(0, limit);
+    console.log(`🔄 Applying pagination: processing ${epics.length} of ${allEpics.length} epics returned by Jira (limit: ${limit})`);
+    
     // Process epics in batches of 10 to avoid overwhelming the system
     const batchSize = 10;
-    const epics = epicsData.issues || [];
     
     for (let i = 0; i < epics.length; i += batchSize) {
       const batch = epics.slice(i, i + batchSize);
@@ -545,16 +565,28 @@ router.post('/epics-with-children', async (req, res) => {
       }
     }
 
-      return epicsWithChildren;
+      // Return paginated response
+      const hasMore = startAt + epicsWithChildren.length < epicsData.total;
+      
+      return {
+        epics: epicsWithChildren,
+        pagination: {
+          limit: limit,
+          startAt: startAt,
+          total: epicsData.total,
+          hasMore: hasMore
+        }
+      };
     };
 
     // Race between processing and timeout
-    const result = await Promise.race([processEpics(), timeoutPromise]) as EpicWithChildren[];
+    const result = await Promise.race([processEpics(), timeoutPromise]) as PaginatedEpicsResponse;
 
-    const totalChildren = result.reduce((total, epic) => total + epic.children.length, 0);
-    const totalStoryPoints = result.reduce((total, epic) => total + epic.totalStoryPoints, 0);
+    const totalChildren = result.epics.reduce((total, epic) => total + epic.children.length, 0);
+    const totalStoryPoints = result.epics.reduce((total, epic) => total + epic.totalStoryPoints, 0);
     
-    console.log(`✅ Returning ${result.length} epics (status != 'Done') with ${totalChildren} children (${totalStoryPoints} total story points) for project ${projectKey}`);
+    console.log(`✅ Returning ${result.epics.length} epics (page ${Math.floor(startAt / limit) + 1}) with ${totalChildren} children (${totalStoryPoints} total story points) for project ${projectKey}`);
+    console.log(`📄 Pagination: ${startAt}-${startAt + result.epics.length} of ${result.pagination.total} total, hasMore: ${result.pagination.hasMore}`);
     res.json(result);
 
   } catch (error: any) {
