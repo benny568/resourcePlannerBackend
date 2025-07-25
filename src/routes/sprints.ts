@@ -4,10 +4,13 @@ import { SprintData, ApiResponse, ApiError, SprintResponse } from '../types';
 
 const router = express.Router();
 
-// GET /api/sprints - Get all sprints with work items
+// GET /api/sprints - Get all sprints with work items (excluding archived)
 router.get('/', async (req, res) => {
   try {
     const sprints = await prisma.sprint.findMany({
+      where: {
+        archived: false
+      },
       include: {
         workItemAssignments: {
           include: {
@@ -117,6 +120,45 @@ router.put('/:id', async (req, res) => {
     console.error('Error updating sprint:', error);
     const apiError: ApiError = {
       error: 'Failed to update sprint',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    };
+    res.status(500).json(apiError);
+  }
+});
+
+// DELETE /api/sprints/:id - Archive a sprint (mark as archived instead of deleting)
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const existingSprint = await prisma.sprint.findUnique({
+      where: { id }
+    });
+
+    if (!existingSprint) {
+      const apiError: ApiError = {
+        error: 'Sprint not found'
+      };
+      return res.status(404).json(apiError);
+    }
+
+    const sprint = await prisma.sprint.update({
+      where: { id },
+      data: {
+        archived: true
+      }
+    });
+
+    const response: ApiResponse<typeof sprint> = {
+      data: sprint,
+      message: 'Sprint archived successfully'
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error('Error archiving sprint:', error);
+    const apiError: ApiError = {
+      error: 'Failed to archive sprint',
       message: error instanceof Error ? error.message : 'Unknown error'
     };
     res.status(500).json(apiError);

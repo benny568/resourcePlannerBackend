@@ -23,52 +23,53 @@ model TeamMember {
 }
 
 model WorkItem {
-  id                      String                   @id @default(cuid())
-  jiraId                  String?                  @map("jira_id") // Optional Jira ticket ID (e.g., REF-1234)
-  title                   String
-  description             String?
-  estimateStoryPoints     Float
-  requiredCompletionDate  DateTime
-  requiredSkills          Json                     @default("[]") // Array of required skills
-  status                  String                   @default("Not Started") // 'Not Started' | 'In Progress' | 'Completed'
-  jiraStatus              String?                  @map("jira_status") // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
-  epicId                  String?                  @map("epic_id") // Optional Epic ID if this work item belongs to an epic
-  isEpic                  Boolean                  @default(false) @map("is_epic") // True if this work item is an epic
-  createdAt               DateTime                 @default(now())
-  updatedAt               DateTime                 @updatedAt
-  
+  id                     String   @id @default(cuid())
+  jiraId                 String?  @map("jira_id") // Optional Jira ticket ID (e.g., REF-1234)
+  title                  String
+  description            String?
+  estimateStoryPoints    Float
+  requiredCompletionDate DateTime
+  requiredSkills         Json     @default("[]") // Array of required skills
+  status                 String   @default("Not Started") // 'Not Started' | 'In Progress' | 'Completed'
+  jiraStatus             String?  @map("jira_status") // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
+  epicId                 String?  @map("epic_id") // Optional Epic ID if this work item belongs to an epic
+  isEpic                 Boolean  @default(false) @map("is_epic") // True if this work item is an epic
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
   // Self-referencing many-to-many for dependencies
-  dependencies            WorkItemDependency[]     @relation("WorkItemDependencies")
-  dependentWorkItems      WorkItemDependency[]     @relation("DependentWorkItems")
-  
+  dependencies       WorkItemDependency[] @relation("WorkItemDependencies")
+  dependentWorkItems WorkItemDependency[] @relation("DependentWorkItems")
+
   // Many-to-many with sprints
-  sprintAssignments       SprintWorkItem[]
+  sprintAssignments SprintWorkItem[]
 
   @@map("work_items")
 }
 
 model WorkItemDependency {
-  workItemId    String   @map("work_item_id")
-  dependsOnId   String   @map("depends_on_id")
-  createdAt     DateTime @default(now())
+  workItemId  String   @map("work_item_id")
+  dependsOnId String   @map("depends_on_id")
+  createdAt   DateTime @default(now())
 
-  workItem      WorkItem @relation("WorkItemDependencies", fields: [workItemId], references: [id], onDelete: Cascade)
-  dependsOn     WorkItem @relation("DependentWorkItems", fields: [dependsOnId], references: [id], onDelete: Cascade)
+  workItem  WorkItem @relation("WorkItemDependencies", fields: [workItemId], references: [id], onDelete: Cascade)
+  dependsOn WorkItem @relation("DependentWorkItems", fields: [dependsOnId], references: [id], onDelete: Cascade)
 
   @@id([workItemId, dependsOnId])
   @@map("work_item_dependencies")
 }
 
 model Sprint {
-  id               String           @id @default(cuid())
-  name             String
-  startDate        DateTime         @map("start_date")
-  endDate          DateTime         @map("end_date")
-  plannedVelocity  Float            @map("planned_velocity")
-  actualVelocity   Float?           @map("actual_velocity")
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
-  
+  id              String   @id @default(cuid())
+  name            String
+  startDate       DateTime @map("start_date")
+  endDate         DateTime @map("end_date")
+  plannedVelocity Float    @map("planned_velocity")
+  actualVelocity  Float?   @map("actual_velocity")
+  archived        Boolean  @default(false) // Mark sprint as archived instead of deleting
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
   // Many-to-many with work items
   workItemAssignments SprintWorkItem[]
 
@@ -76,26 +77,26 @@ model Sprint {
 }
 
 model SprintWorkItem {
-  sprintId     String    @map("sprint_id")
-  workItemId   String    @map("work_item_id")
-  assignedAt   DateTime  @default(now())
+  sprintId   String   @map("sprint_id")
+  workItemId String   @map("work_item_id")
+  assignedAt DateTime @default(now())
 
-  sprint       Sprint    @relation(fields: [sprintId], references: [id], onDelete: Cascade)
-  workItem     WorkItem  @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  sprint   Sprint   @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  workItem WorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
 
   @@id([sprintId, workItemId])
   @@map("sprint_work_items")
 }
 
 model PersonalHoliday {
-  id           String     @id @default(cuid())
-  teamMemberId String     @map("team_member_id")
-  startDate    DateTime   @map("start_date")
-  endDate      DateTime   @map("end_date")
+  id           String   @id @default(cuid())
+  teamMemberId String   @map("team_member_id")
+  startDate    DateTime @map("start_date")
+  endDate      DateTime @map("end_date")
   description  String?
-  createdAt    DateTime   @default(now())
+  createdAt    DateTime @default(now())
 
-  teamMember   TeamMember @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
+  teamMember TeamMember @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
 
   @@map("personal_holidays")
 }
@@ -111,12 +112,12 @@ model PublicHoliday {
 }
 
 model SprintConfig {
-  id                      String   @id @default(cuid())
-  firstSprintStartDate    DateTime @map("first_sprint_start_date")
-  sprintDurationDays      Int      @map("sprint_duration_days")
-  defaultVelocity         Float    @map("default_velocity")
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  id                   String   @id @default(cuid())
+  firstSprintStartDate DateTime @map("first_sprint_start_date")
+  sprintDurationDays   Int      @map("sprint_duration_days")
+  defaultVelocity      Float    @map("default_velocity")
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
   @@map("sprint_config")
 }
