@@ -170,7 +170,7 @@ router.get('/:id', async (req, res) => {
 // POST /api/work-items - Create a new work item
 router.post('/', async (req, res) => {
   try {
-    const { 
+    let { 
       title, 
       description, 
       estimateStoryPoints, 
@@ -181,7 +181,8 @@ router.post('/', async (req, res) => {
       jiraId,
       jiraStatus,
       epicId,
-      isEpic = false
+      isEpic = false,
+      priority = 'Medium'
     }: WorkItemData = req.body;
 
     if (!title || !estimateStoryPoints || !requiredCompletionDate || !requiredSkills || (Array.isArray(requiredSkills) && requiredSkills.length === 0)) {
@@ -201,6 +202,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json(apiError);
     }
 
+    // Validate and normalize story points
     if (estimateStoryPoints <= 0) {
       console.error('❌ Invalid story points validation failed:', {
         estimateStoryPoints,
@@ -214,6 +216,12 @@ router.post('/', async (req, res) => {
         message: 'Story points must be greater than 0'
       };
       return res.status(400).json(apiError);
+    }
+
+    // Cap story points at reasonable maximum to prevent massive values
+    if (estimateStoryPoints > 100) {
+      console.warn(`⚠️ Unreasonable story points value ${estimateStoryPoints} for work item "${title}", capping at 20`);
+      estimateStoryPoints = 20;
     }
 
     // Validate dependencies exist
@@ -265,7 +273,8 @@ router.post('/', async (req, res) => {
           jiraId,
           jiraStatus,
           epicId,
-          isEpic
+          isEpic,
+          priority
         }
       });
 
@@ -302,7 +311,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { 
+    let { 
       title, 
       description, 
       estimateStoryPoints, 
@@ -313,7 +322,8 @@ router.put('/:id', async (req, res) => {
       jiraId,
       jiraStatus,
       epicId,
-      isEpic
+      isEpic,
+      priority
     }: Partial<WorkItemData> = req.body;
 
     // Check if work item exists
@@ -328,13 +338,21 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json(apiError);
     }
 
-    // Validate story points if provided
-    if (estimateStoryPoints !== undefined && estimateStoryPoints <= 0) {
-      const apiError: ApiError = {
-        error: 'Invalid story points',
-        message: 'Story points must be greater than 0'
-      };
-      return res.status(400).json(apiError);
+    // Validate and normalize story points if provided
+    if (estimateStoryPoints !== undefined) {
+      if (estimateStoryPoints <= 0) {
+        const apiError: ApiError = {
+          error: 'Invalid story points',
+          message: 'Story points must be greater than 0'
+        };
+        return res.status(400).json(apiError);
+      }
+      
+      // Cap story points at reasonable maximum to prevent massive values
+      if (estimateStoryPoints > 100) {
+        console.warn(`⚠️ Unreasonable story points value ${estimateStoryPoints} for work item update, capping at 20`);
+        estimateStoryPoints = 20;
+      }
     }
 
     // Validate dependencies if provided
@@ -377,7 +395,8 @@ router.put('/:id', async (req, res) => {
           ...(jiraId !== undefined && { jiraId }),
           ...(jiraStatus !== undefined && { jiraStatus }),
           ...(epicId !== undefined && { epicId }),
-          ...(isEpic !== undefined && { isEpic })
+          ...(isEpic !== undefined && { isEpic }),
+          ...(priority !== undefined && { priority })
         }
       });
 
@@ -412,6 +431,97 @@ router.put('/:id', async (req, res) => {
     console.error('Error updating work item:', error);
     const apiError: ApiError = {
       error: 'Failed to update work item',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    };
+    res.status(500).json(apiError);
+  }
+});
+
+// DELETE /api/work-items/selective-reset - Selectively reset database based on data types
+router.delete('/selective-reset', async (req, res) => {
+  try {
+    const { dataTypes } = req.body;
+    
+    if (!dataTypes || !Array.isArray(dataTypes) || dataTypes.length === 0) {
+      const apiError: ApiError = {
+        error: 'Invalid request',
+        message: 'dataTypes array is required and must contain at least one item'
+      };
+      return res.status(400).json(apiError);
+    }
+
+    console.log('🚨 Starting selective database reset...', dataTypes);
+    
+    const deletionResults: string[] = [];
+    let deletedCounts: { [key: string]: number } = {};
+
+    // Always delete dependencies first if work items are being deleted
+    if (dataTypes.includes('workItems') || dataTypes.includes('dependencies')) {
+      const sprintAssignments = await prisma.sprintWorkItem.deleteMany({});
+      const dependencies = await prisma.workItemDependency.deleteMany({});
+      deletionResults.push(`✅ Cleared ${sprintAssignments.count} sprint assignments`);
+      deletionResults.push(`✅ Cleared ${dependencies.count} work item dependencies`);
+      deletedCounts.sprintAssignments = sprintAssignments.count;
+      deletedCounts.dependencies = dependencies.count;
+    }
+
+    // Delete personal holidays
+    if (dataTypes.includes('privateHolidays')) {
+      const result = await prisma.personalHoliday.deleteMany({});
+      deletionResults.push(`✅ Cleared ${result.count} personal holidays`);
+      deletedCounts.personalHolidays = result.count;
+    }
+
+    // Delete public holidays
+    if (dataTypes.includes('publicHolidays')) {
+      const result = await prisma.publicHoliday.deleteMany({});
+      deletionResults.push(`✅ Cleared ${result.count} public holidays`);
+      deletedCounts.publicHolidays = result.count;
+    }
+
+    // Delete work items (includes epics)
+    if (dataTypes.includes('workItems')) {
+      const result = await prisma.workItem.deleteMany({});
+      deletionResults.push(`✅ Cleared ${result.count} work items and epics`);
+      deletedCounts.workItems = result.count;
+    }
+
+    // Delete sprints
+    if (dataTypes.includes('sprints')) {
+      // If work items weren't deleted, we need to clear sprint assignments first
+      if (!dataTypes.includes('workItems')) {
+        const sprintAssignments = await prisma.sprintWorkItem.deleteMany({});
+        deletionResults.push(`✅ Cleared ${sprintAssignments.count} sprint assignments`);
+        deletedCounts.sprintAssignments = sprintAssignments.count;
+      }
+      const result = await prisma.sprint.deleteMany({});
+      deletionResults.push(`✅ Cleared ${result.count} sprints`);
+      deletedCounts.sprints = result.count;
+    }
+
+    // Delete team members
+    if (dataTypes.includes('teamMembers')) {
+      const result = await prisma.teamMember.deleteMany({});
+      deletionResults.push(`✅ Cleared ${result.count} team members`);
+      deletedCounts.teamMembers = result.count;
+    }
+
+    const summary = deletionResults.join(', ');
+    console.log('🎉 Selective database reset completed:', summary);
+
+    const response: ApiResponse<{ summary: string; deletedCounts: any }> = {
+      data: { 
+        summary,
+        deletedCounts
+      },
+      message: 'Selected data types deleted successfully'
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error('❌ Error in selective database reset:', error);
+    const apiError: ApiError = {
+      error: 'Failed to perform selective reset',
       message: error instanceof Error ? error.message : 'Unknown error'
     };
     res.status(500).json(apiError);
@@ -602,6 +712,50 @@ router.delete('/clear-all', async (req, res) => {
     console.error('Error clearing work items:', error);
     const apiError: ApiError = {
       error: 'Failed to clear work items',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    };
+    res.status(500).json(apiError);
+  }
+});
+
+// DELETE /api/work-items/reset-database - Reset entire database to start fresh
+router.delete('/reset-database', async (req, res) => {
+  try {
+    console.log('🚨 RESETTING ENTIRE DATABASE - Starting complete wipe...');
+    
+    // Delete all data in the correct order (respecting foreign key constraints)
+    await prisma.sprintWorkItem.deleteMany({});
+    console.log('✅ Cleared all sprint work item assignments');
+    
+    await prisma.workItemDependency.deleteMany({});
+    console.log('✅ Cleared all work item dependencies');
+    
+    await prisma.personalHoliday.deleteMany({});
+    console.log('✅ Cleared all personal holidays');
+    
+    await prisma.publicHoliday.deleteMany({});
+    console.log('✅ Cleared all public holidays');
+    
+    await prisma.workItem.deleteMany({});
+    console.log('✅ Cleared all work items');
+    
+    await prisma.sprint.deleteMany({});
+    console.log('✅ Cleared all sprints');
+    
+    await prisma.teamMember.deleteMany({});
+    console.log('✅ Cleared all team members');
+
+    const response: ApiResponse<{ message: string }> = {
+      data: { message: 'Database reset completed successfully' },
+      message: 'All data cleared - database is now empty and ready for fresh setup'
+    };
+
+    console.log('🎉 Database reset completed successfully!');
+    res.json(response);
+  } catch (error) {
+    console.error('❌ Error resetting database:', error);
+    const apiError: ApiError = {
+      error: 'Failed to reset database',
       message: error instanceof Error ? error.message : 'Unknown error'
     };
     res.status(500).json(apiError);

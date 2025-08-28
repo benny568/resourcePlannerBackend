@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { prisma } from '../lib/prisma';
 
 const router = Router();
 
@@ -323,8 +324,67 @@ router.post('/ticket', async (req, res) => {
 // Extract regular work items (NOT epics) from Jira project
 router.post('/work-items', async (req, res) => {
   try {
-    const { projectKey } = ProjectKeySchema.parse(req.body);
-    console.log(`🔍 Extracting regular work items (excluding epics) from Jira project: ${projectKey}`);
+    const { projectKey, includeVelocity } = req.body;
+    const validatedData = ProjectKeySchema.parse({ projectKey });
+    console.log(`🔍 Extracting regular work items (excluding epics) from Jira project: ${validatedData.projectKey}`);
+    
+    // NEW: If includeVelocity is requested, return velocity data instead
+    if (includeVelocity) {
+      console.log(`📊 VELOCITY MODE: Getting completed issues for velocity analysis`);
+      
+      const completedJql = `project = ${validatedData.projectKey} AND status = Done`;
+      const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+      
+      const completedData = await callJiraAPI('search', {
+        jql: completedJql,
+        fields: `key,summary,status,${storyPointsField},fixVersions`,
+        maxResults: 100
+      }) as JiraSearchResponse;
+      
+      console.log(`📈 Found ${completedData.issues.length} completed issues`);
+      
+      // DEBUG: Log first few issues for troubleshooting
+      if (completedData.issues.length > 0) {
+        console.log(`🔍 DEBUG: First completed issue:`, {
+          key: completedData.issues[0].key,
+          summary: completedData.issues[0].fields.summary,
+          status: completedData.issues[0].fields.status.name,
+          storyPoints: (completedData.issues[0].fields as any)[storyPointsField],
+          fixVersions: completedData.issues[0].fields.fixVersions
+        });
+      } else {
+        console.log(`⚠️ DEBUG: No completed issues found with JQL: ${completedJql}`);
+      }
+      
+      // Group by fixVersions for velocity
+      const velocityGroups = new Map();
+      completedData.issues.forEach(issue => {
+        const points = (issue.fields as any)[storyPointsField] || 1;
+        const versions = issue.fields.fixVersions || [];
+        const versionName = versions.length > 0 ? versions[0].name : 'No Version';
+        
+        if (!velocityGroups.has(versionName)) {
+          velocityGroups.set(versionName, { count: 0, points: 0 });
+        }
+        const group = velocityGroups.get(versionName);
+        group.count += 1;
+        group.points += points;
+      });
+      
+      const syncResults = Array.from(velocityGroups.entries()).map(([name, data]) => ({
+        sprintName: name,
+        status: 'synced',
+        actualVelocity: data.points,
+        completedCount: data.count,
+        message: `Found ${data.count} issues with ${data.points} total points`
+      }));
+      
+      return res.json({
+        message: `Velocity analysis complete: ${syncResults.length} versions found`,
+        syncResults,
+        timestamp: new Date().toISOString()
+      });
+    }
 
     // Get all non-epic issues from the project that are not Done AND are not children of epics
     const jql = `project = ${projectKey} AND issuetype != Epic AND status != Done AND parent is EMPTY`;
@@ -813,5 +873,750 @@ router.post('/ai-import-team-members', async (req, res) => {
     });
   }
 });
+
+// Simple velocity analysis endpoint that works with basic Jira API
+router.post('/velocity-analysis', async (req, res) => {
+  try {
+    const { projectKey } = req.body;
+    
+    if (!projectKey) {
+      return res.status(400).json({ 
+        error: 'Project key is required',
+        suggestion: 'Provide a project key (e.g., REF)'
+      });
+    }
+
+    console.log(`📊 Starting velocity analysis for project: ${projectKey}`);
+
+    // Get completed issues using basic Jira API
+    const completedIssuesJql = `project = ${projectKey} AND status = Done`;
+    const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+    
+    const completedIssues = await callJiraAPI('search', {
+      jql: completedIssuesJql,
+      fields: `key,summary,status,${storyPointsField},fixVersions,updated,created`,
+      maxResults: 100
+    }) as JiraSearchResponse;
+
+    console.log(`📈 Found ${completedIssues.issues.length} completed issues`);
+
+    // Group by fixVersions for velocity calculation
+    const velocityData = new Map<string, { issues: any[], totalPoints: number }>();
+    
+    completedIssues.issues.forEach(issue => {
+      const points = (issue.fields as any)[storyPointsField] || 1;
+      const versions = issue.fields.fixVersions || [];
+      
+      if (versions.length > 0) {
+        const version = versions[0].name;
+        if (!velocityData.has(version)) {
+          velocityData.set(version, { issues: [], totalPoints: 0 });
+        }
+        const data = velocityData.get(version)!;
+        data.issues.push(issue);
+        data.totalPoints += points;
+      }
+    });
+
+    // Convert to sync results format
+    const syncResults = Array.from(velocityData.entries()).map(([versionName, data]) => ({
+      sprintName: versionName,
+      status: 'analyzed',
+      actualVelocity: data.totalPoints,
+      completedCount: data.issues.length,
+      message: `Analyzed ${data.issues.length} completed issues`
+    }));
+
+    res.json({
+      message: `Velocity analysis complete: ${syncResults.length} versions analyzed`,
+      syncResults,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error in velocity analysis:', error);
+    res.status(500).json({
+      error: 'Failed to analyze velocity data',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      suggestion: 'Check Jira API connectivity and credentials'
+    });
+  }
+});
+
+// Sync sprint data from Jira to update actual velocity and work item status
+router.post('/sync-sprints', async (req, res) => {
+  try {
+    const { projectKey } = req.body;
+    
+    if (!projectKey) {
+      return res.status(400).json({ 
+        error: 'Project key is required',
+        suggestion: 'Provide a project key (e.g., REF)'
+      });
+    }
+
+    console.log(`📊 Starting simplified sprint sync for project: ${projectKey}`);
+
+    // Get completed issues using basic Jira API (same as velocity-analysis)
+    const completedIssuesJql = `project = ${projectKey} AND status = Done`;
+    const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+    
+    const completedIssues = await callJiraAPI('search', {
+      jql: completedIssuesJql,
+      fields: `key,summary,status,${storyPointsField},fixVersions,updated,created`,
+      maxResults: 100
+    }) as JiraSearchResponse;
+
+    console.log(`📈 Found ${completedIssues.issues.length} completed issues`);
+
+    // Group by fixVersions for velocity calculation
+    const velocityData = new Map<string, { issues: any[], totalPoints: number }>();
+    
+    completedIssues.issues.forEach(issue => {
+      const points = (issue.fields as any)[storyPointsField] || 1;
+      const versions = issue.fields.fixVersions || [];
+      
+      if (versions.length > 0) {
+        const version = versions[0].name;
+        if (!velocityData.has(version)) {
+          velocityData.set(version, { issues: [], totalPoints: 0 });
+        }
+        const data = velocityData.get(version)!;
+        data.issues.push(issue);
+        data.totalPoints += points;
+      }
+    });
+
+    // Convert to sync results format
+    const syncResults = Array.from(velocityData.entries()).map(([versionName, data]) => ({
+      sprintName: versionName,
+      status: 'synced',
+      actualVelocity: data.totalPoints,
+      completedCount: data.issues.length,
+      message: `Synced ${data.issues.length} completed issues with ${data.totalPoints} story points`
+    }));
+
+    res.json({
+      message: `Successfully synced ${syncResults.length} sprint versions`,
+      syncResults,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error syncing sprints from Jira:', error);
+    res.status(500).json({
+      error: 'Failed to sync sprint data from Jira',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      suggestion: 'Check Jira API connectivity and credentials'
+    });
+  }
+});
+
+// Simplified helper function that only uses standard Jira search API
+async function getCompletedSprintsFromJira(projectKey: string, sprintNames?: string[]) {
+  try {
+    console.log(`🔍 Getting completed issues for velocity analysis: ${projectKey}`);
+    
+    // Use only basic JQL that works with all Jira instances
+    const completedIssuesJql = `project = ${projectKey} AND status = Done`;
+    console.log(`🔍 Executing JQL: ${completedIssuesJql}`);
+    
+    const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+    const completedIssuesResponse = await callJiraAPI('search', {
+      jql: completedIssuesJql,
+      fields: `key,summary,status,${storyPointsField},fixVersions,updated,created`,
+      maxResults: 200 // Limit to recent issues
+    }) as JiraSearchResponse;
+
+    console.log(`📊 Found ${completedIssuesResponse.issues.length} completed issues`);
+
+    // Create a simple grouping by fixVersions (treating these as "sprints")
+    const sprintGroups = new Map<string, any[]>();
+    
+    completedIssuesResponse.issues.forEach(issue => {
+      const versions = issue.fields.fixVersions || [];
+      
+      if (versions.length > 0) {
+        // Group by first fixVersion
+        const version = versions[0];
+        const sprintKey = version.name;
+        
+        // Filter by sprint names if provided
+        if (sprintNames && sprintNames.length > 0) {
+          const matchesFilter = sprintNames.some((name: string) => 
+            sprintKey.toLowerCase().includes(name.toLowerCase())
+          );
+          if (!matchesFilter) return;
+        }
+        
+        if (!sprintGroups.has(sprintKey)) {
+          sprintGroups.set(sprintKey, []);
+        }
+        sprintGroups.get(sprintKey)!.push(issue);
+      } else {
+        // Group issues without fixVersions into "Recent Work"
+        const defaultKey = 'Recent Work';
+        if (!sprintGroups.has(defaultKey)) {
+          sprintGroups.set(defaultKey, []);
+        }
+        sprintGroups.get(defaultKey)!.push(issue);
+      }
+    });
+
+    // Convert groups to sprint details
+    const sprintDetails = [];
+    for (const [sprintName, issues] of sprintGroups.entries()) {
+      console.log(`📈 Processing sprint group: ${sprintName} with ${issues.length} issues`);
+      
+      // Calculate actual velocity (sum of story points completed)
+      const completedStoryPoints = issues.reduce((total, issue) => {
+        const points = (issue.fields as any)[storyPointsField] || 0;
+        return total + points;
+      }, 0);
+
+      // Estimate sprint dates from issue completion dates
+      const issueDates = issues.map(issue => new Date(issue.fields.updated || issue.fields.created));
+      const startDate = new Date(Math.min(...issueDates.map(d => d.getTime())));
+      const endDate = new Date(Math.max(...issueDates.map(d => d.getTime())));
+
+      sprintDetails.push({
+        id: sprintName.replace(/\s+/g, '-').toLowerCase(), // Create a simple ID
+        name: sprintName,
+        state: 'closed',
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        completedIssues: issues,
+        actualVelocity: completedStoryPoints,
+        completedCount: issues.length
+      });
+    }
+
+    console.log(`✅ Found ${sprintDetails.length} sprint groups with completion data`);
+    return sprintDetails;
+  } catch (error) {
+    console.error('❌ Error getting sprints from Jira:', error);
+    throw error;
+  }
+}
+
+// Helper function to sync individual sprint data
+async function syncSprintData(jiraSprint: any) {
+  try {
+    console.log(`🔄 Syncing sprint: ${jiraSprint.name}`);
+
+    // Find matching sprint in our database by exact name match first, then fuzzy match
+    let existingSprint = await prisma.sprint.findFirst({
+      where: {
+        name: jiraSprint.name,
+        archived: false
+      },
+      include: {
+        workItemAssignments: {
+          include: {
+            workItem: true
+          }
+        }
+      }
+    });
+
+    // If exact match not found, try fuzzy match but check for duplicates
+    if (!existingSprint) {
+      const fuzzySprints = await prisma.sprint.findMany({
+        where: {
+          name: {
+            contains: jiraSprint.name
+          },
+          archived: false
+        },
+        include: {
+          workItemAssignments: {
+            include: {
+              workItem: true
+            }
+          }
+        }
+      });
+
+      if (fuzzySprints.length > 1) {
+        console.warn(`⚠️ Multiple sprints found for fuzzy match "${jiraSprint.name}":`, 
+          fuzzySprints.map(s => `${s.name} (ID: ${s.id})`));
+        // Use the one with the most recent creation or lowest ID as a fallback
+        existingSprint = fuzzySprints.sort((a, b) => a.id.localeCompare(b.id))[0];
+        console.log(`🎯 Using sprint: ${existingSprint.name} (ID: ${existingSprint.id})`);
+      } else if (fuzzySprints.length === 1) {
+        existingSprint = fuzzySprints[0];
+      }
+    }
+
+    if (!existingSprint) {
+      console.log(`⚠️ No matching sprint found in database for: ${jiraSprint.name}`);
+      return {
+        sprintName: jiraSprint.name,
+        status: 'not_found',
+        message: 'Sprint not found in local database'
+      };
+    }
+
+    console.log(`✅ Found matching sprint: ${existingSprint.name} (ID: ${existingSprint.id})`);
+
+    // Update sprint's actual velocity
+    await prisma.sprint.update({
+      where: { id: existingSprint.id },
+      data: {
+        actualVelocity: jiraSprint.actualVelocity
+      }
+    });
+
+    // Update work item statuses based on Jira completion
+    const updatedWorkItems = [];
+    for (const assignment of existingSprint.workItemAssignments) {
+      const workItem = assignment.workItem;
+      
+      if (workItem.jiraId) {
+        // Check if this work item was completed in Jira
+        const completedInJira = jiraSprint.completedIssues.some((issue: any) => 
+          issue.key === workItem.jiraId
+        );
+
+        if (completedInJira && workItem.status !== 'Completed') {
+          // Update work item status to completed
+          await prisma.workItem.update({
+            where: { id: workItem.id },
+            data: {
+              status: 'Completed',
+              jiraStatus: 'Done'
+            }
+          });
+
+          updatedWorkItems.push({
+            id: workItem.id,
+            jiraId: workItem.jiraId,
+            title: workItem.title,
+            oldStatus: workItem.status,
+            newStatus: 'Completed'
+          });
+
+          console.log(`📝 Updated work item ${workItem.jiraId} status: ${workItem.status} → Completed`);
+        }
+      }
+    }
+
+    return {
+      sprintName: jiraSprint.name,
+      sprintId: existingSprint.id,
+      status: 'synced',
+      actualVelocity: jiraSprint.actualVelocity,
+      plannedVelocity: existingSprint.plannedVelocity,
+      updatedWorkItems: updatedWorkItems.length,
+      workItemUpdates: updatedWorkItems
+    };
+
+  } catch (error) {
+    console.error(`❌ Error syncing sprint ${jiraSprint.name}:`, error);
+    return {
+      sprintName: jiraSprint.name,
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+// NEW: Simple velocity sync endpoint that works with basic Jira API
+router.post('/sync-velocity', async (req, res) => {
+  try {
+    const { projectKey } = req.body;
+    
+    if (!projectKey) {
+      return res.status(400).json({ 
+        error: 'Project key is required',
+        suggestion: 'Provide a project key (e.g., REF)'
+      });
+    }
+
+    console.log(`🚀 NEW: Starting velocity sync for project: ${projectKey}`);
+
+    // Use the simplest possible Jira API call
+    const jql = `project = ${projectKey} AND status = Done`;
+    const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+    
+    console.log(`📋 Executing JQL: ${jql}`);
+    
+    const response = await callJiraAPI('search', {
+      jql: jql,
+      fields: `key,summary,status,${storyPointsField},fixVersions`,
+      maxResults: 50
+    }) as JiraSearchResponse;
+
+    console.log(`✅ Successfully retrieved ${response.issues.length} completed issues`);
+
+    // Simple grouping by fixVersion
+    const versionGroups = new Map<string, { count: number, points: number }>();
+    
+    response.issues.forEach(issue => {
+      const points = (issue.fields as any)[storyPointsField] || 1;
+      const versions = issue.fields.fixVersions || [];
+      
+      const versionName = versions.length > 0 ? versions[0].name : 'No Version';
+      
+      if (!versionGroups.has(versionName)) {
+        versionGroups.set(versionName, { count: 0, points: 0 });
+      }
+      
+      const group = versionGroups.get(versionName)!;
+      group.count += 1;
+      group.points += points;
+    });
+
+    // Convert to expected format
+    const syncResults = Array.from(versionGroups.entries()).map(([name, data]) => ({
+      sprintName: name,
+      status: 'synced',
+      actualVelocity: data.points,
+      completedCount: data.count,
+      message: `Found ${data.count} issues with ${data.points} total points`
+    }));
+
+    const result = {
+      message: `Velocity sync completed: ${syncResults.length} versions found`,
+      syncResults,
+      timestamp: new Date().toISOString()
+    };
+
+    console.log(`🎉 Velocity sync successful:`, result);
+    res.json(result);
+
+  } catch (error) {
+    console.error('❌ Error in NEW velocity sync:', error);
+    res.status(500).json({
+      error: 'Velocity sync failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      suggestion: 'Check Jira connectivity'
+    });
+  }
+});
+
+// TEST: Simple test endpoint to verify backend updates
+router.post('/test-sync', async (req, res) => {
+  try {
+    res.json({
+      message: "NEW backend code is working!",
+      timestamp: new Date().toISOString(),
+      version: "2.0"
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Test failed' });
+  }
+});
+
+// NEW: Sync completed tickets from Jira to past sprints
+router.post('/sync-past-sprints', async (req, res) => {
+  try {
+    const { projectKey, dateRange } = req.body;
+    
+    if (!projectKey) {
+      return res.status(400).json({ 
+        error: 'Project key is required',
+        suggestion: 'Provide a project key (e.g., REF)'
+      });
+    }
+
+    console.log(`🔄 Starting past sprint sync for project: ${projectKey}`);
+
+    // Get completed issues from Jira
+    let jql = `project = ${projectKey} AND status = Done`;
+    
+    // Add date filter if provided
+    if (dateRange && dateRange.start && dateRange.end) {
+      jql += ` AND updated >= "${dateRange.start}" AND updated <= "${dateRange.end}"`;
+    }
+    
+    const storyPointsField = process.env.JIRA_STORY_POINTS_FIELD || 'customfield_10016';
+    
+    const completedIssues = await callJiraAPI('search', {
+      jql: jql,
+      fields: `key,summary,description,status,${storyPointsField},customfield_10020,updated,created,labels`,
+      maxResults: 200
+    }) as JiraSearchResponse;
+
+    console.log(`📈 Found ${completedIssues.issues.length} completed issues to sync`);
+
+    // Get existing sprints from database (past sprints only)
+    const pastSprints = await prisma.sprint.findMany({
+      where: {
+        archived: false,
+        endDate: { lt: new Date() } // Only past sprints
+      },
+      include: {
+        workItemAssignments: {
+          include: {
+            workItem: true
+          }
+        }
+      },
+      orderBy: {
+        startDate: 'asc'
+      }
+    });
+
+    console.log(`📊 Found ${pastSprints.length} past sprints in database`);
+
+    // Process each completed issue
+    const syncResults = [];
+    const processedTickets = new Set();
+
+    for (const issue of completedIssues.issues) {
+      if (processedTickets.has(issue.key)) {
+        continue; // Skip duplicates
+      }
+      processedTickets.add(issue.key);
+
+      try {
+        const result = await syncCompletedTicketToSprint(issue, pastSprints, storyPointsField);
+        syncResults.push(result);
+      } catch (error) {
+        console.error(`❌ Error syncing ticket ${issue.key}:`, error);
+        syncResults.push({
+          ticketKey: issue.key,
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    }
+
+    // Update sprint velocities
+    const sprintUpdates = await updateSprintVelocities(pastSprints);
+
+    res.json({
+      message: `Successfully synced ${completedIssues.issues.length} completed tickets to past sprints`,
+      syncResults,
+      sprintUpdates,
+      timestamp: new Date().toISOString(),
+      summary: {
+        totalTickets: completedIssues.issues.length,
+        successfulSyncs: syncResults.filter(r => r.status === 'synced').length,
+        errors: syncResults.filter(r => r.status === 'error').length,
+        sprintUpdates: sprintUpdates.length
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error syncing past sprints from Jira:', error);
+    res.status(500).json({
+      error: 'Failed to sync past sprints from Jira',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      suggestion: 'Check Jira API connectivity and credentials'
+    });
+  }
+});
+
+// Helper function to extract sprint name from Jira sprint field
+function extractSprintName(sprintData: any): string | null {
+  try {
+    // Handle different sprint data formats
+    let sprintName = null;
+    
+    if (typeof sprintData === 'string') {
+      // Parse sprint string that might contain sprint info
+      // Format: "name=REF Q3 2025 Sprint 2,startDate=2025-07-01,endDate=2025-07-14,state=closed"
+      const nameMatch = sprintData.match(/name=([^,]+)/);
+      if (nameMatch) {
+        sprintName = nameMatch[1];
+      }
+    } else if (sprintData && typeof sprintData === 'object') {
+      // Handle object format - the sprint object from customfield_10020
+      sprintName = sprintData.name || sprintData.sprintName;
+    }
+    
+    if (sprintName) {
+      console.log(`📋 Extracted sprint name: ${sprintName}`);
+      return sprintName.trim();
+    }
+    
+    console.log(`⚠️ Could not extract sprint name from:`, JSON.stringify(sprintData));
+    return null;
+  } catch (error) {
+    console.error(`❌ Error extracting sprint name:`, error);
+    return null;
+  }
+}
+
+// Helper function to sync a completed ticket to the appropriate sprint
+async function syncCompletedTicketToSprint(jiraIssue: any, pastSprints: any[], storyPointsField: string) {
+  const ticketKey = jiraIssue.key;
+  const summary = jiraIssue.fields.summary;
+  const points = (jiraIssue.fields as any)[storyPointsField] || 1;
+  // Use the correct sprint field (customfield_10020)
+  const sprints = jiraIssue.fields.customfield_10020 || [];
+  const updatedDate = new Date(jiraIssue.fields.updated);
+  const createdDate = new Date(jiraIssue.fields.created);
+
+  console.log(`🎫 Processing ticket ${ticketKey}: ${summary}`);
+
+  // Strategy 1: Match by sprint field - use the last sprint if multiple sprints
+  let targetSprint = null;
+  if (sprints && sprints.length > 0) {
+    // Get the last sprint (most recent) from the sprint field
+    const lastSprint = Array.isArray(sprints) ? sprints[sprints.length - 1] : sprints;
+    const sprintName = extractSprintName(lastSprint);
+    
+    if (sprintName) {
+      targetSprint = pastSprints.find(sprint => 
+        sprint.name.toLowerCase() === sprintName.toLowerCase() ||
+        sprint.name.toLowerCase().includes(sprintName.toLowerCase()) ||
+        sprintName.toLowerCase().includes(sprint.name.toLowerCase())
+      );
+      
+      if (targetSprint) {
+        console.log(`✅ Matched ticket ${ticketKey} to sprint by sprint field: ${targetSprint.name} (from Jira sprint: ${sprintName})`);
+      } else {
+        console.log(`⚠️ No matching sprint found for Jira sprint: ${sprintName}`);
+      }
+    }
+  }
+
+  // Strategy 2: Match by date range if no sprint field match
+  if (!targetSprint) {
+    targetSprint = pastSprints.find(sprint => {
+      const sprintStart = new Date(sprint.startDate);
+      const sprintEnd = new Date(sprint.endDate);
+      return updatedDate >= sprintStart && updatedDate <= sprintEnd;
+    });
+    
+    if (targetSprint) {
+      console.log(`✅ Matched ticket ${ticketKey} to sprint by date: ${targetSprint.name}`);
+    }
+  }
+
+  // Strategy 3: Use the most recent past sprint if no match
+  if (!targetSprint && pastSprints.length > 0) {
+    targetSprint = pastSprints[pastSprints.length - 1]; // Most recent sprint
+    console.log(`⚠️ No specific match for ${ticketKey}, assigning to most recent sprint: ${targetSprint.name}`);
+  }
+
+  if (!targetSprint) {
+    return {
+      ticketKey,
+      status: 'no_sprint_found',
+      message: 'No appropriate past sprint found for this ticket'
+    };
+  }
+
+  // Check if work item already exists
+  let workItem = await prisma.workItem.findFirst({
+    where: { jiraId: ticketKey }
+  });
+
+  if (!workItem) {
+    // Create new work item from Jira ticket
+    const skills = (jiraIssue.fields.labels || []).filter((label: string) => 
+      ['frontend', 'backend', 'devops', 'design', 'qa'].includes(label.toLowerCase())
+    );
+
+    // Use skill detection from existing function
+    const detectedSkills = skills.length > 0 ? skills : ['backend']; // Default to backend if no labels
+
+    workItem = await prisma.workItem.create({
+      data: {
+        jiraId: ticketKey,
+        title: summary,
+        description: extractTextFromADF(jiraIssue.fields.description) || `Work item synced from completed Jira ticket ${ticketKey}`,
+        estimateStoryPoints: points,
+        requiredCompletionDate: updatedDate, // Use completion date
+        requiredSkills: detectedSkills,
+        status: 'Completed', // Mark as completed since it's done in Jira
+        jiraStatus: 'Done'
+      }
+    });
+
+    console.log(`➕ Created new work item for ${ticketKey}`);
+  } else {
+    // Update existing work item status if not already completed
+    if (workItem.status !== 'Completed') {
+      await prisma.workItem.update({
+        where: { id: workItem.id },
+        data: {
+          status: 'Completed',
+          jiraStatus: 'Done'
+        }
+      });
+      console.log(`🔄 Updated work item ${ticketKey} status to Completed`);
+    }
+  }
+
+  // Check if already assigned to this sprint
+  const existingAssignment = await prisma.sprintWorkItem.findUnique({
+    where: {
+      sprintId_workItemId: {
+        sprintId: targetSprint.id,
+        workItemId: workItem.id
+      }
+    }
+  });
+
+  if (!existingAssignment) {
+    // Assign work item to sprint
+    await prisma.sprintWorkItem.create({
+      data: {
+        sprintId: targetSprint.id,
+        workItemId: workItem.id
+      }
+    });
+    console.log(`🔗 Assigned work item ${ticketKey} to sprint ${targetSprint.name}`);
+  }
+
+  return {
+    ticketKey,
+    status: 'synced',
+    sprintName: targetSprint.name,
+    sprintId: targetSprint.id,
+    workItemId: workItem.id,
+    storyPoints: points,
+    message: `Synced to sprint: ${targetSprint.name}`
+  };
+}
+
+// Helper function to update sprint velocities based on assigned completed work items
+async function updateSprintVelocities(sprints: any[]) {
+  const updates = [];
+
+  for (const sprint of sprints) {
+    // Calculate actual velocity from completed work items assigned to this sprint
+    const completedWorkItems = await prisma.sprintWorkItem.findMany({
+      where: {
+        sprintId: sprint.id,
+        workItem: {
+          status: 'Completed'
+        }
+      },
+      include: {
+        workItem: true
+      }
+    });
+
+    const actualVelocity = completedWorkItems.reduce((total, assignment) => {
+      return total + assignment.workItem.estimateStoryPoints;
+    }, 0);
+
+    // Update sprint only if velocity changed
+    if (sprint.actualVelocity !== actualVelocity) {
+      await prisma.sprint.update({
+        where: { id: sprint.id },
+        data: { actualVelocity }
+      });
+
+      updates.push({
+        sprintId: sprint.id,
+        sprintName: sprint.name,
+        oldVelocity: sprint.actualVelocity,
+        newVelocity: actualVelocity,
+        completedItems: completedWorkItems.length
+      });
+
+      console.log(`📊 Updated sprint ${sprint.name} velocity: ${sprint.actualVelocity} → ${actualVelocity}`);
+    }
+  }
+
+  return updates;
+}
 
 export default router; 

@@ -20,6 +20,7 @@ router.get('/', async (req, res) => {
         firstSprintStartDate: new Date(),
         sprintDurationDays: 14,
         defaultVelocity: 20,
+        startingQuarterSprintNumber: 1,
         createdAt: new Date(),
         updatedAt: new Date()
       };
@@ -49,20 +50,20 @@ router.get('/', async (req, res) => {
 // POST /api/sprint-config - Create or update sprint configuration
 router.post('/', async (req, res) => {
   try {
-    const { firstSprintStartDate, sprintDurationDays, defaultVelocity }: SprintConfigData = req.body;
+    const { firstSprintStartDate, sprintDurationDays, defaultVelocity, startingQuarterSprintNumber }: SprintConfigData = req.body;
 
-    if (!firstSprintStartDate || !sprintDurationDays || !defaultVelocity) {
+    if (!firstSprintStartDate || !sprintDurationDays || !defaultVelocity || startingQuarterSprintNumber === undefined) {
       const apiError: ApiError = {
         error: 'Missing required fields',
-        message: 'firstSprintStartDate, sprintDurationDays, and defaultVelocity are required'
+        message: 'firstSprintStartDate, sprintDurationDays, defaultVelocity, and startingQuarterSprintNumber are required'
       };
       return res.status(400).json(apiError);
     }
 
-    if (sprintDurationDays <= 0 || defaultVelocity <= 0) {
+    if (sprintDurationDays <= 0 || defaultVelocity <= 0 || startingQuarterSprintNumber <= 0) {
       const apiError: ApiError = {
         error: 'Invalid values',
-        message: 'Sprint duration and default velocity must be greater than 0'
+        message: 'Sprint duration, default velocity, and starting quarter sprint number must be greater than 0'
       };
       return res.status(400).json(apiError);
     }
@@ -74,7 +75,8 @@ router.post('/', async (req, res) => {
       data: {
         firstSprintStartDate: new Date(firstSprintStartDate),
         sprintDurationDays,
-        defaultVelocity
+        defaultVelocity,
+        startingQuarterSprintNumber
       }
     });
 

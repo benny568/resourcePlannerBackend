@@ -126,22 +126,46 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// In-memory lock for regeneration operations to prevent race conditions
-let regenerationLock = false;
+// Track active regeneration operations to prevent race conditions  
+let regenerationInProgress = false;
+let lastRegenerationTime = 0;
+const REGENERATION_COOLDOWN = 5000; // 5 second cooldown between regenerations
 
 // POST /api/sprints/batch - Batch update/create sprints
 router.post('/batch', async (req, res) => {
   const { sprints, isRegeneration }: { sprints: SprintData[], isRegeneration?: boolean } = req.body;
-  
-  try {
-    // Check for regeneration lock to prevent concurrent operations
-    if (isRegeneration && regenerationLock) {
-      console.log('⚠️ Regeneration already in progress, rejecting request');
+
+  // Prevent multiple regeneration operations running simultaneously or too quickly
+  if (isRegeneration) {
+    const now = Date.now();
+    
+    if (regenerationInProgress) {
+      console.warn('⚠️ Regeneration already in progress, rejecting duplicate request');
       const apiError: ApiError = {
-        error: 'Regeneration in progress',
-        message: 'Sprint regeneration is already in progress. Please wait for it to complete.'
+        error: 'Regeneration already in progress',
+        message: 'Another sprint regeneration is currently running. Please wait for it to complete.'
       };
       return res.status(409).json(apiError);
+    }
+    
+    if (now - lastRegenerationTime < REGENERATION_COOLDOWN) {
+      const remainingCooldown = Math.ceil((REGENERATION_COOLDOWN - (now - lastRegenerationTime)) / 1000);
+      console.warn(`⚠️ Regeneration cooldown active, rejecting request. ${remainingCooldown}s remaining`);
+      const apiError: ApiError = {
+        error: 'Regeneration cooldown active',
+        message: `Please wait ${remainingCooldown} seconds before regenerating sprints again.`
+      };
+      return res.status(429).json(apiError);
+    }
+    
+    lastRegenerationTime = now;
+  }
+  
+  try {
+    // Set regeneration lock
+    if (isRegeneration) {
+      regenerationInProgress = true;
+      console.log('🔒 Starting regeneration process...');
     }
 
     if (!Array.isArray(sprints) || sprints.length === 0) {
@@ -154,43 +178,19 @@ router.post('/batch', async (req, res) => {
 
     console.log(`📡 Batch sprint operation: processing ${sprints.length} sprints (regeneration: ${isRegeneration})`);
 
-    // Set regeneration lock if this is a regeneration operation
-    if (isRegeneration) {
-      regenerationLock = true;
-      console.log('🔒 Regeneration lock acquired');
-    }
-
     // Use transaction to ensure all operations succeed or fail together
     const results = await prisma.$transaction(async (tx) => {
-      // If this is a regeneration operation, first clear existing sprints that would conflict
-      if (isRegeneration && sprints.length > 0) {
-        // Clear sprints that have the same name pattern (e.g., all Q3/Q4 2025 sprints)
-        const sprintNames = sprints.map(s => s.name);
-        const sprintDateRange = {
-          start: new Date(Math.min(...sprints.map(s => new Date(s.startDate).getTime()))),
-          end: new Date(Math.max(...sprints.map(s => new Date(s.endDate).getTime())))
-        };
+      // If this is a regeneration operation, clear ALL existing non-archived sprints
+      if (isRegeneration) {
+        console.log(`🗑️ REGENERATION: Clearing ALL existing sprints`);
         
-        console.log(`🗑️ Clearing existing sprints that overlap with regeneration range`);
-        console.log(`📅 Date range: ${sprintDateRange.start.toISOString()} to ${sprintDateRange.end.toISOString()}`);
-        console.log(`🏷️ Sprint names: ${sprintNames.join(', ')}`);
-        
-        await tx.sprint.deleteMany({
+        const deletedResult = await tx.sprint.deleteMany({
           where: {
-            OR: [
-              // Clear sprints with matching names
-              { name: { in: sprintNames } },
-              // Clear sprints that overlap with the date range
-              {
-                AND: [
-                  { startDate: { lte: sprintDateRange.end } },
-                  { endDate: { gte: sprintDateRange.start } }
-                ]
-              }
-            ],
             archived: false
           }
         });
+        
+        console.log(`✅ Deleted ${deletedResult.count} existing sprints during regeneration`);
       }
 
       const updatedSprints = [];
@@ -204,27 +204,70 @@ router.post('/batch', async (req, res) => {
 
         // For regeneration, always create new sprints since we cleared existing ones
         if (isRegeneration) {
-          console.log(`➕ Creating new sprint: ${name}`);
-          const sprint = await tx.sprint.create({
-            data: {
-              name,
-              startDate: new Date(startDate),
-              endDate: new Date(endDate),
-              plannedVelocity,
-              ...(actualVelocity !== undefined && { actualVelocity })
-            }
+          // Extra safety: Check if sprint with this name already exists to prevent duplicates
+          const existingDuplicate = await tx.sprint.findFirst({
+            where: { name, archived: false }
           });
-          updatedSprints.push(sprint);
+          
+          if (existingDuplicate) {
+            console.warn(`⚠️ DUPLICATE PREVENTION: Sprint "${name}" already exists, skipping creation`);
+            updatedSprints.push(existingDuplicate);
+          } else {
+            console.log(`➕ Creating new sprint: ${name}`);
+            const sprint = await tx.sprint.create({
+              data: {
+                name,
+                startDate: new Date(startDate),
+                endDate: new Date(endDate),
+                plannedVelocity,
+                ...(actualVelocity !== undefined && { actualVelocity })
+              }
+            });
+            updatedSprints.push(sprint);
+          }
         } else {
-          // For non-regeneration operations, check for existing sprints
-          const existingSprint = await tx.sprint.findFirst({
+          // For non-regeneration operations, check for existing sprints by name first (exact match)
+          let existingSprint = await tx.sprint.findFirst({
             where: {
               name,
-              startDate: new Date(startDate),
-              endDate: new Date(endDate),
               archived: false
             }
           });
+
+          // If no exact name match, check by name + dates for precision
+          if (!existingSprint) {
+            existingSprint = await tx.sprint.findFirst({
+              where: {
+                name,
+                startDate: new Date(startDate),
+                endDate: new Date(endDate),
+                archived: false
+              }
+            });
+          }
+
+          // If still no match, check for potential duplicates with similar names
+          if (!existingSprint) {
+            const similarSprints = await tx.sprint.findMany({
+              where: {
+                name: {
+                  contains: name
+                },
+                archived: false
+              }
+            });
+
+            if (similarSprints.length > 0) {
+              console.warn(`⚠️ Found ${similarSprints.length} similar sprints for "${name}":`, 
+                similarSprints.map(s => `${s.name} (ID: ${s.id})`));
+              // Use exact match if available, otherwise skip to prevent duplicates
+              existingSprint = similarSprints.find(s => s.name === name) || null;
+              if (!existingSprint && similarSprints.length > 0) {
+                console.log(`🚫 Skipping creation of "${name}" to prevent duplicates. Use exact names or archive duplicates first.`);
+                continue; // Skip this sprint to prevent duplicates
+              }
+            }
+          }
 
           let sprint;
           if (existingSprint) {
@@ -274,7 +317,7 @@ router.post('/batch', async (req, res) => {
   } finally {
     // Always release regeneration lock
     if (isRegeneration) {
-      regenerationLock = false;
+      regenerationInProgress = false;
       console.log('🔓 Regeneration lock released');
     }
   }

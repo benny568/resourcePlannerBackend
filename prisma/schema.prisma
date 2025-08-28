@@ -34,6 +34,7 @@ model WorkItem {
   jiraStatus             String?  @map("jira_status") // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
   epicId                 String?  @map("epic_id") // Optional Epic ID if this work item belongs to an epic
   isEpic                 Boolean  @default(false) @map("is_epic") // True if this work item is an epic
+  priority               String   @default("Medium") // Epic priority: 'Critical', 'High', 'Medium', 'Low'
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
@@ -112,12 +113,13 @@ model PublicHoliday {
 }
 
 model SprintConfig {
-  id                   String   @id @default(cuid())
-  firstSprintStartDate DateTime @map("first_sprint_start_date")
-  sprintDurationDays   Int      @map("sprint_duration_days")
-  defaultVelocity      Float    @map("default_velocity")
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                          String   @id @default(cuid())
+  firstSprintStartDate        DateTime @map("first_sprint_start_date")
+  sprintDurationDays          Int      @map("sprint_duration_days")
+  defaultVelocity             Float    @map("default_velocity")
+  startingQuarterSprintNumber Int      @default(1) @map("starting_quarter_sprint_number")
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
 
   @@map("sprint_config")
 }

@@ -18,6 +18,7 @@ export interface WorkItemData {
   jiraStatus?: string | null; // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
   epicId?: string | null; // Optional Epic ID if this work item belongs to an epic
   isEpic?: boolean; // True if this work item is an epic
+  priority?: 'Critical' | 'High' | 'Medium' | 'Low'; // Epic priority level
 }
 
 export interface EpicData {
@@ -53,6 +54,7 @@ export interface SprintConfigData {
   firstSprintStartDate: string;
   sprintDurationDays: number;
   defaultVelocity: number;
+  startingQuarterSprintNumber: number;
 }
 
 // Extended response types for API responses
@@ -71,6 +73,8 @@ export interface WorkItemResponse {
   jiraId?: string | null; // Optional Jira ticket ID (e.g., REF-1234)
   jiraStatus?: string | null; // Original Jira status (e.g., "Ready for Testing", "In Review", etc.)
   epicId?: string | null; // Optional Epic ID if this work item belongs to an epic
+  isEpic?: boolean; // True if this work item is an epic
+  priority?: string; // Epic priority level
 }
 
 export interface SprintResponse {

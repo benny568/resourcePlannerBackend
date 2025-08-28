@@ -16,6 +16,7 @@ export interface WorkItemData {
     jiraStatus?: string | null;
     epicId?: string | null;
     isEpic?: boolean;
+    priority?: 'Critical' | 'High' | 'Medium' | 'Low';
 }
 export interface EpicData {
     jiraId: string;
@@ -46,6 +47,7 @@ export interface SprintConfigData {
     firstSprintStartDate: string;
     sprintDurationDays: number;
     defaultVelocity: number;
+    startingQuarterSprintNumber: number;
 }
 export interface WorkItemResponse {
     id: string;
@@ -62,6 +64,8 @@ export interface WorkItemResponse {
     jiraId?: string | null;
     jiraStatus?: string | null;
     epicId?: string | null;
+    isEpic?: boolean;
+    priority?: string;
 }
 export interface SprintResponse {
     id: string;

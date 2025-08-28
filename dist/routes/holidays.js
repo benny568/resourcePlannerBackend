@@ -68,6 +68,53 @@ router.post('/', async (req, res) => {
         res.status(500).json(apiError);
     }
 });
+// PUT /api/holidays/:id - Update a public holiday
+router.put('/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, date, impactPercentage } = req.body;
+        const existingHoliday = await prisma_1.prisma.publicHoliday.findUnique({
+            where: { id }
+        });
+        if (!existingHoliday) {
+            const apiError = {
+                error: 'Public holiday not found'
+            };
+            return res.status(404).json(apiError);
+        }
+        if (impactPercentage !== undefined && (impactPercentage < 0 || impactPercentage > 100)) {
+            const apiError = {
+                error: 'Invalid impact percentage',
+                message: 'Impact percentage must be between 0 and 100'
+            };
+            return res.status(400).json(apiError);
+        }
+        const updateData = {};
+        if (name !== undefined)
+            updateData.name = name;
+        if (date !== undefined)
+            updateData.date = new Date(date);
+        if (impactPercentage !== undefined)
+            updateData.impactPercentage = impactPercentage;
+        const holiday = await prisma_1.prisma.publicHoliday.update({
+            where: { id },
+            data: updateData
+        });
+        const response = {
+            data: holiday,
+            message: 'Public holiday updated successfully'
+        };
+        res.json(response);
+    }
+    catch (error) {
+        console.error('Error updating public holiday:', error);
+        const apiError = {
+            error: 'Failed to update public holiday',
+            message: error instanceof Error ? error.message : 'Unknown error'
+        };
+        res.status(500).json(apiError);
+    }
+});
 // DELETE /api/holidays/:id - Delete a public holiday
 router.delete('/:id', async (req, res) => {
     try {
